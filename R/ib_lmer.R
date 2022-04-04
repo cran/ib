@@ -72,6 +72,9 @@ ib.lmerMod <- function(object, thetastart=NULL, control=list(...), extra_param =
   # temporary solution by new evaluation:
   tmp_object <- eval(cl,env_ib)
 
+  # initial value
+  diff <- rep(NA_real_, control$maxit)
+
   # Iterative bootstrap algorithm:
   while(test_theta > control$tol && k < control$maxit){
 
@@ -91,18 +94,33 @@ ib.lmerMod <- function(object, thetastart=NULL, control=list(...), extra_param =
 
     # update value
     delta <- pi0 - pi_star
-    if(extra_param) delta[id_var] <- exp(log(pi0[id_var])-log(pi_star[id_var]))
     t1 <- t0 + delta
-    if(ncor>0) t1[id_cor] <- tanh(atanh(t0[id_cor]) + atanh(pi0[id_cor] - atanh(pi_star[id_cor])))
+    if(extra_param && control$constraint) t1[id_var] <- exp(log(t0[id_var]) + log(pi0[id_var])-log(pi_star[id_var]))
+    if(ncor>0 && control$constraint) t1[id_cor] <- tanh(atanh(t0[id_cor]) + atanh(pi0[id_cor] - atanh(pi_star[id_cor])))
 
     # test diff between thetas
-    test_theta <- sqrt(drop(crossprod(t0-t1))/p)
+    test_theta <- sum(delta^2)
+    if(k>0) diff[k] <- test_theta
 
     # initialize test
     if(!k) tt_old <- test_theta+1
 
-    # Stop if no more progress
-    if(tt_old <= test_theta) {break} else {tt_old <- test_theta}
+    # Alternative stopping criteria, early stop :
+    if(control$early_stop){
+      if(tt_old <= test_theta){
+        warning("Algorithm stopped because the objective function does not reduce")
+        break
+      }
+    }
+
+    # Alternative stopping criteria, "statistically flat progress curve" :
+    if(k > 10L){
+      try1 <- diff[k:(k-10)]
+      try2 <- k:(k-10)
+      if(var(try1)<=1e-3) break
+      mod <- lm(try1 ~ try2)
+      if(summary(mod)$coefficients[2,4] > 0.2) break
+    }
 
     # update increment
     k <- k + 1L
@@ -115,20 +133,18 @@ ib.lmerMod <- function(object, thetastart=NULL, control=list(...), extra_param =
     # update theta
     t0 <- t1
   }
+  # warning for reaching max number of iterations
+  if(k>=control$maxit) warning("maximum number of iteration reached")
 
   # update lmerMod object
   updateLmer(tmp_object, extra_param)
 
   # additional metadata
-  ib_warn <- NULL
-  if(k>=control$maxit) ib_warn <- gettext("maximum number of iteration reached")
-  if(tt_old<=test_theta) ib_warn <- gettext("objective function does not reduce")
-  ib_extra <- list(
+   ib_extra <- list(
     iteration = k,
     of = sqrt(drop(crossprod(delta))),
     estimate = t0,
     test_theta = test_theta,
-    ib_warn = ib_warn,
     boot = tmp_pi)
 
   new("IbLmer",
@@ -290,6 +306,13 @@ updateLmer <- function(object, Sigma){
 
 simulation.lmerMod <- simulation.default
 
+#' @title Simulation for linear mixed model regression
+#' @description simulation method for class \linkS4class{IbLmer}
+#' @param object an object of class \linkS4class{IbLmer}
+#' @param control a \code{list} of parameters for controlling the iterative procedure
+#' (see \code{\link{ibControl}}).
+#' @param ... further arguments.
+#' @export
 setMethod("simulation", signature = className("lmerMod","lme4"),
           definition = simulation.lmerMod)
 

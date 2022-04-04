@@ -7,6 +7,23 @@
 ## NOTE: due to compatibility issues between S3/S4 classes,
 ##       we consider supplying the fitted model in a new slot.
 
+setOldClass("betareg")
+#' @describeIn Ib fitted model by \code{betareg} from \pkg{betareg}
+#' @export
+setClass("IbBetareg",
+         slots = list(
+           object = "betareg",
+           ib_extra = "list"))
+
+setOldClass("summary.betareg")
+#' @describeIn SummaryIb summary of class \code{summary.betareg} from \pkg{betareg}
+#' @export
+setClass("SummaryIbBetareg",
+         slots = list(
+           summ = "summary.betareg",
+           ib_extra = "list"))
+
+
 #' @describeIn Ib fitted model by \code{glm} from \pkg{stats}
 #' @export
 setClass("IbGlm",
@@ -102,20 +119,25 @@ setClass("SummaryIbVglm",
 #' @title
 #' An S4 class union for \code{ib}
 #' @description
-#' Members of the union are \linkS4class{IbGlm}, \linkS4class{IbLm},
-#' \linkS4class{IbLmer}, \linkS4class{IbNegbin}, \linkS4class{IbNls},
-#' \linkS4class{IbVglm}
+#' Members of the union are \linkS4class{IbBetareg}, \linkS4class{IbGlm},
+#' \linkS4class{IbLm}, \linkS4class{IbLmer}, \linkS4class{IbNegbin},
+#' \linkS4class{IbNls}, \linkS4class{IbVglm}
 #' @details
 #' The `Functions` section describes members of the class union.
+#' @return
+#' Each member of the union has a \code{slot} with the initial object
+#' corrected by the \code{ib} (see \code{\link{getObject}}) and a second \code{slot} with
+#' extra meta data from \code{ib} (see \code{\link{getExtra}}).
 #' @author Samuel Orso
+#' @seealso \code{\link{getExtra}}, \code{\link{getObject}}
 #' @export
 setClassUnion(name = "Ib",
-              members = c("IbGlm","IbLm","IbLmer",
+              members = c("IbBetareg","IbGlm","IbLm","IbLmer",
                           "IbNegbin","IbNls","IbVglm"))
 
 #' @title An S4 class union for \code{summary}
 #' @description
-#' Members of the union are \linkS4class{SummaryIbGlm}, \linkS4class{SummaryIbLm},
+#' Members of the union are \linkS4class{SummaryIbBetareg}, \linkS4class{SummaryIbGlm}, \linkS4class{SummaryIbLm},
 #' \linkS4class{SummaryIbLmer}, \linkS4class{SummaryIbNegbin}, \linkS4class{SummaryIbNls},
 #' \linkS4class{SummaryIbVglm}
 #' iterative bootstrap procedure
@@ -124,5 +146,5 @@ setClassUnion(name = "Ib",
 #' @author Samuel Orso
 #' @export
 setClassUnion(name = "SummaryIb",
-              members = c("SummaryIbGlm","SummaryIbLm","SummaryIbLmer",
+              members = c("SummaryIbBetareg", "SummaryIbGlm","SummaryIbLm","SummaryIbLmer",
                           "SummaryIbNegbin","SummaryIbNls","SummaryIbVglm"))

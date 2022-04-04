@@ -26,12 +26,11 @@ ib.glm <- function(object, thetastart=NULL, control=list(...), extra_param = FAL
     isNegbin <- TRUE
   }
 
-
   if(extra_param){
     pi0 <- switch(fam,
                   gaussian = {c(pi0, sigma(object))},
                   Gamma = {c(pi0, gamma.shape(object)$alpha)},
-                  negbin = {c(pi0, object$theta)}
+                  negbin = {c(pi0, 1/object$theta)}
     )
     if(is.null(pi0))
       stop(gettextf("extra_param for family '%s' is not implemented", fam), domain = NA)
@@ -66,12 +65,12 @@ ib.glm <- function(object, thetastart=NULL, control=list(...), extra_param = FAL
   mf <- model.frame(object)
   mt <- terms(object)
   if(!intercept_only){
-    x <- if(!is.empty.model(mt)) model.matrix(mt, mf, object$contrasts)
+    x0 <- if(!is.empty.model(mt)) model.matrix(mt, mf, object$contrasts)
     # check if model has an intercept
     has_intercept <- attr(mt,"intercept")
     if(has_intercept){
       # remove intercept from design
-      x <- x[,!grepl("Intercept",colnames(x))]
+      x <- x0[,!grepl("Intercept",colnames(x0))]
       cl$formula <- quote(y~x)
     } else {
       cl$formula <- quote(y~x-1)
@@ -91,43 +90,92 @@ ib.glm <- function(object, thetastart=NULL, control=list(...), extra_param = FAL
   # copy the object
   tmp_object <- object
 
+  # copy the control
+  control1 <- control
+  control1$H <- 1L
+  linkinv <- object$family$linkinv
+
+  # initial values
   extra <- NULL
+  if(isNegbin) out_of_space_counter <- 0
+  diff <- rep(NA_real_, control$maxit)
 
   # Iterative bootstrap algorithm:
   while(test_theta > control$tol && k < control$maxit){
-    # update initial estimator
-    tmp_object$coefficients <- t0[1:p0]
+    # update object for simulation
+    if(k!=0){
+      eta <- as.vector(x0 %*% t0[1:p0])
+      mu <- linkinv(eta)
+      tmp_object$fitted.values <- mu
+      tmp_object$coefficients <- t0[1:p0]
+    }
+
     if(extra_param) switch (fam,
                             Gamma = {extra <- t0[p]},
                             gaussian = {extra <- t0[p]},
-                            negbin = {tmp_object$theta <- t0[p]})
-    sim <- simulation(tmp_object,control,extra)
+                            negbin = {tmp_object$theta <- 1/t0[p]})
+    # approximate
     tmp_pi <- matrix(NA_real_,nrow=p,ncol=control$H)
     for(h in seq_len(control$H)){
-      assign("y",sim[,h],env_ib)
-      fit_tmp <- eval(cl,env_ib)
+      control1$seed <- control$seed + h
+      sim <- simulation(tmp_object,control1,extra)
+      assign("y",sim,env_ib)
+      fit_tmp <- tryCatch(error = function(cnd) NULL, {eval(cl,env_ib)})
+      iter <- 1L
+      while(is.null(fit_tmp) && iter < 10L){
+        control1$seed <- control$seed + control$H * h + iter
+        sim <- simulation(tmp_object,control1,extra)
+        assign("y",sim,env_ib)
+        fit_tmp <- tryCatch(error = function(cnd) NULL, {eval(cl,env_ib)})
+        iter <- iter + 1L
+      }
+      if(is.null(fit_tmp)) next
       tmp_pi[1:p0,h] <- coef(fit_tmp)
       if(extra_param)
         tmp_pi[p,h] <- switch(fam,
                               Gamma = {gamma.shape(fit_tmp)$alpha},
                               gaussian = {sigma(fit_tmp)},
-                              negbin = {fit_tmp$theta})
+                              negbin = {1/fit_tmp$theta})
     }
     pi_star <- control$func(tmp_pi)
 
     # update value
     delta <- pi0 - pi_star
-    if(extra_param) delta[p] <- exp(log(pi0[p])-log(pi_star[p]))
     t1 <- t0 + delta
+    if(extra_param && control$constraint){
+      if(isNegbin){ # specific to negative binomial
+        if(t1[p] <= 0){
+          out_of_space_counter <- out_of_space_counter + 1.0
+          t1[p] <- 1.0 / out_of_space_counter
+        }
+      } else {
+        t1[p] <- exp(log(t0[p]) + log(pi0[p]) - log(pi_star[p]))
+      }
+    }
 
     # test diff between thetas
-    test_theta <- sqrt(drop(crossprod(t0-t1))/p)
+    test_theta <- sum(delta^2)
+    if(k>0) diff[k] <- test_theta
 
     # initialize test
     if(!k) tt_old <- test_theta+1
 
-    # Stop if no more progress
-    if(tt_old <= test_theta) {break} else {tt_old <- test_theta}
+    # Alternative stopping criteria, early stop :
+    if(control$early_stop){
+      if(tt_old <= test_theta){
+        warning("Algorithm stopped because the objective function does not reduce")
+        break
+        }
+    }
+
+    # Alternative stopping criteria, "statistically flat progress curve" :
+    if(k > 10L){
+      try1 <- diff[k:(k-10)]
+      try2 <- k:(k-10)
+      if(var(try1)<=1e-3) break
+      mod <- lm(try1 ~ try2)
+      if(summary(mod)$coefficients[2,4] > 0.2) break
+    }
 
     # update increment
     k <- k + 1L
@@ -139,10 +187,15 @@ ib.glm <- function(object, thetastart=NULL, control=list(...), extra_param = FAL
 
     # update theta
     t0 <- t1
+
+    # update test
+    tt_old <- test_theta
   }
+  # warning for reaching max number of iterations
+  if(k>=control$maxit) warning("maximum number of iteration reached")
 
   # update glm object
-  eta <- predict.glm(tmp_object)
+  eta <- predict.glm(tmp_object) # FIXME: this does not return the "correct 'eta'"
   mu <- object$family$linkinv(eta)
   dev <- sum(object$family$dev.resids(object$y,mu,object$prior.weights))
 
@@ -155,15 +208,11 @@ ib.glm <- function(object, thetastart=NULL, control=list(...), extra_param = FAL
                                       mu, object$prior.weights, dev) + 2 * object$rank
 
   # additional metadata
-  ib_warn <- NULL
-  if(k>=control$maxit) ib_warn <- gettext("maximum number of iteration reached")
-  if(tt_old<=test_theta) ib_warn <- gettext("objective function does not reduce")
   ib_extra <- list(
     iteration = k,
     of = sqrt(drop(crossprod(delta))),
     estimate = t0,
     test_theta = test_theta,
-    ib_warn = ib_warn,
     boot = tmp_pi)
 
   if(isNegbin){
@@ -203,8 +252,16 @@ simulation.glm <- function(object, control=list(...), extra=NULL, ...){
     stop(gettextf("simulation not implemented for family '%s'",fam),
          call.=FALSE, domain=NA)
 
+  if(grepl("Negative Binomial",fam)) fam <- "negbin"
+
   set.seed(control$seed)
   if(!exists(".Random.seed", envir = .GlobalEnv)) runif(1)
+
+  # user-defined simulation method
+  if(!is.null(control$sim)){
+    sim <- control$sim(object, control, extra, ...)
+    return(sim)
+  }
 
   sim <- switch(fam,
                 Gamma = {
@@ -217,6 +274,7 @@ simulation.glm <- function(object, control=list(...), extra=NULL, ...){
                 } else {
                   matrix(fitted(object) + rnorm(length(object$y) * control$H, sd=extra), ncol=control$H)
                 },
+                negbin = {matrix(simulate_negbin(object,control$H), ncol=control$H)},
                 matrix(object$family$simulate(object,control$H), ncol=control$H)
   )
   if(control$cens) sim <- censoring(sim,control$right,control$left)
@@ -225,6 +283,14 @@ simulation.glm <- function(object, control=list(...), extra=NULL, ...){
   sim
 }
 
+#' @title Simulation for a Generalized Linear Model regression
+#' @description simulation method for class \linkS4class{IbGlm}
+#' @param object an object of class \linkS4class{IbGlm}
+#' @param control a \code{list} of parameters for controlling the iterative procedure
+#' (see \code{\link{ibControl}}).
+#' @param extra \code{NULL} by default; extra parameters to pass to simulation.
+#' @param ... further arguments
+#' @export
 setMethod("simulation", signature = className("glm","stats"),
           definition = simulation.glm)
 
@@ -232,10 +298,11 @@ setMethod("simulation", signature = className("glm","stats"),
 # which does not support "shape" as an argument
 #' @importFrom stats rgamma
 simulate_gamma <- function (object, nsim, shape){
+  if(shape<0) stop("'shape' must be positive")
   wp <- object$prior.weights
   ftd <- fitted(object)
   shp <- shape * wp
-  rgamma(nsim * length(ftd), shape = shp, rate = shp/ftd)
+  rgamma(n = nsim * length(ftd), shape = shp, rate = shp/ftd)
 }
 
 # ib.negbin (MASS)
@@ -251,5 +318,23 @@ setMethod("ib", signature = "negbin",
 
 simulation.negbin <- simulation.glm
 
+# inspired from MASS::simulate.negbin
+# @importFrom MASS rnegbin
+#' @importFrom stats rnbinom
+simulate_negbin <- function (object, nsim) {
+  if(object$theta<0) stop("'theta' must be positive")
+  ftd <- fitted(object)
+  # rnegbin(n = nsim * length(ftd), mu = ftd, theta = object$theta)
+  rnbinom(n = nsim * length(ftd), mu = ftd, size = object$theta)
+}
+
+#' @title Simulation for a negative binomial regression
+#' @description simulation method for class \linkS4class{IbNegbin}
+#' @param object an object of class \linkS4class{IbNegbin}
+#' @param control a \code{list} of parameters for controlling the iterative procedure
+#' (see \code{\link{ibControl}}).
+#' @param extra \code{NULL} by default; extra parameters to pass to simulation.
+#' @param ... further arguments
+#' @export
 setMethod("simulation", signature = "negbin",
           definition = simulation.negbin)

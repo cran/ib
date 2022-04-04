@@ -73,6 +73,9 @@ ib.vglm <- function(object, thetastart=NULL, control=list(...), extra_param = FA
   # copy the object
   tmp_object <- object
 
+  # initial value
+  diff <- rep(NA_real_, control$maxit)
+
   # Iterative bootstrap algorithm:
   while(test_theta > control$tol && k < control$maxit){
     # browser()
@@ -83,7 +86,9 @@ ib.vglm <- function(object, thetastart=NULL, control=list(...), extra_param = FA
     for(h in seq_len(control$H)){
       assign("y",sim[,h],env_ib)
       # FIXME: deal with warnings from vglm.fitter
-      fit_tmp <- eval(cl,env_ib)
+      # fit_tmp <- eval(cl,env_ib)
+      fit_tmp <- tryCatch(error = function(cnd) NULL, {eval(cl,env_ib)})
+      if(is.null(fit_tmp)) next
       tmp_pi[1:p0,h] <- coef(fit_tmp)
     }
     pi_star <- control$func(tmp_pi)
@@ -93,13 +98,28 @@ ib.vglm <- function(object, thetastart=NULL, control=list(...), extra_param = FA
     t1 <- t0 + delta
 
     # test diff between thetas
-    test_theta <- sqrt(drop(crossprod(t0-t1))/p)
+    test_theta <- sum(delta^2)
+    if(k>0) diff[k] <- test_theta
 
     # initialize test
     if(!k) tt_old <- test_theta+1
 
-    # Stop if no more progress
-    if(tt_old <= test_theta) {break} else {tt_old <- test_theta}
+    # Alternative stopping criteria, early stop :
+    if(control$early_stop){
+      if(tt_old <= test_theta){
+        warning("Algorithm stopped because the objective function does not reduce")
+        break
+      }
+    }
+
+    # Alternative stopping criteria, "statistically flat progress curve" :
+    if(k > 10L){
+      try1 <- diff[k:(k-10)]
+      try2 <- k:(k-10)
+      if(var(try1)<=1e-3) break
+      mod <- lm(try1 ~ try2)
+      if(summary(mod)$coefficients[2,4] > 0.2) break
+    }
 
     # update increment
     k <- k + 1L
@@ -112,6 +132,8 @@ ib.vglm <- function(object, thetastart=NULL, control=list(...), extra_param = FA
     # update theta
     t0 <- t1
   }
+  # warning for reaching max number of iterations
+  if(k>=control$maxit) warning("maximum number of iteration reached")
 
   # update vglm object
   extra <- slot(object, "extra")
@@ -142,15 +164,11 @@ ib.vglm <- function(object, thetastart=NULL, control=list(...), extra_param = FA
   slot(tmp_object, "call") <- slot(object,"call")
 
   # additional metadata
-  ib_warn <- NULL
-  if(k>=control$maxit) ib_warn <- gettext("maximum number of iteration reached")
-  if(tt_old<=test_theta) ib_warn <- gettext("objective function does not reduce")
   ib_extra <- list(
     iteration = k,
     of = sqrt(drop(crossprod(delta))),
     estimate = t0,
     test_theta = test_theta,
-    ib_warn = ib_warn,
     boot = tmp_pi)
 
   new("IbVglm",
@@ -192,6 +210,12 @@ simulation.vglm <- function(object, control=list(...), extra_param = NULL, ...){
   set.seed(control$seed)
   if(!exists(".Random.seed", envir = .GlobalEnv)) runif(1)
 
+  # user-defined simulation method
+  if(!is.null(control$sim)){
+    sim <- control$sim(object, control, extra_param, ...)
+    return(sim)
+  }
+
   sim <- matrix(slot(fam, "simslot")(object,control$H), ncol = control$H)
 
   if(control$cens) sim <- censoring(sim,control$right,control$left)
@@ -200,5 +224,13 @@ simulation.vglm <- function(object, control=list(...), extra_param = NULL, ...){
   sim
 }
 
+#' @title Simulation for vector generalized linear model regression
+#' @description simulation method for class \linkS4class{IbVglm}
+#' @param object an object of class \linkS4class{IbVglm}
+#' @param control a \code{list} of parameters for controlling the iterative procedure
+#' (see \code{\link{ibControl}}).
+#' @param extra_param \code{NULL} by default; extra parameters to pass to simulation.
+#' @param ... further arguments
+#' @export
 setMethod("simulation", signature = className("vglm","VGAM"),
           definition = simulation.vglm)
